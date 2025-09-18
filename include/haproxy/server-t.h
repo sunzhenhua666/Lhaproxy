@@ -279,6 +279,7 @@ struct server {
 	enum srv_state next_state, cur_state;   /* server state among SRV_ST_* */
 	enum srv_admin next_admin, cur_admin;   /* server maintenance status : SRV_ADMF_* */
 	signed char use_ssl;		        /* ssl enabled (1: on, 0: disabled, -1 forced off)  */
+	signed char mysql_ssl;		        /* mysql ssl pre-handshake enabled (1: on, 0: disabled, -1 forced off)  */
 	unsigned int flags;                     /* server flags (SRV_F_*) */
 	unsigned int pp_opts;                   /* proxy protocol options (SRV_PP_*) */
 	struct mt_list global_list;             /* attach point in the global servers_list */

@@ -98,6 +98,302 @@
  * to conditionally define it in openssl-compat.h than using lots of ifdefs.
  */
 
+/* MySQL Protocol Constants */
+#define MYSQL_PROTOCOL_VERSION 10
+#define MYSQL_SERVER_VERSION "8.0.35-HAProxy-MySQL-SSL"
+#define MYSQL_DEFAULT_CHARSET 33  /* utf8_general_ci */
+#define MYSQL_CLIENT_SSL_FLAG 0x0800
+#define MYSQL_SSL_REQUEST_SIZE 32
+
+/* MySQL Server Greeting Packet Structure */
+struct mysql_server_greeting {
+	uint8_t protocol_version;
+	char server_version[256];
+	uint32_t connection_id;
+	uint8_t auth_plugin_data_part1[8];
+	uint8_t filler;
+	uint16_t capability_flags_low;
+	uint8_t character_set;
+	uint16_t status_flags;
+	uint16_t capability_flags_high;
+	uint8_t auth_plugin_data_len;
+	uint8_t reserved[10];
+	uint8_t auth_plugin_data_part2[12];
+	char auth_plugin_name[21];
+} __attribute__((packed));
+
+/* MySQL SSL Request Packet Structure */
+struct mysql_ssl_request {
+	uint32_t capability_flags;
+	uint32_t max_packet_size;
+	uint8_t character_set;
+	uint8_t reserved[23];
+} __attribute__((packed));
+
+/* MySQL Protocol Helper Functions */
+
+static int mysql_send_server_greeting(struct connection *conn)
+{
+	struct mysql_server_greeting greeting;
+	struct buffer *buf;
+	int ret;
+	uint32_t packet_len;
+	uint8_t header[4];
+
+	/* Initialize greeting packet */
+	memset(&greeting, 0, sizeof(greeting));
+	greeting.protocol_version = MYSQL_PROTOCOL_VERSION;
+	strncpy(greeting.server_version, MYSQL_SERVER_VERSION, sizeof(greeting.server_version) - 1);
+	greeting.connection_id = htonl(1); /* Simple connection ID */
+	greeting.capability_flags_low = htons(0x0000); /* Basic capabilities */
+	greeting.character_set = MYSQL_DEFAULT_CHARSET;
+	greeting.status_flags = htons(0x0002); /* SERVER_STATUS_AUTOCOMMIT */
+	greeting.capability_flags_high = htons(0x0000);
+	greeting.auth_plugin_data_len = 21;
+	strncpy(greeting.auth_plugin_name, "mysql_native_password", sizeof(greeting.auth_plugin_name) - 1);
+
+	/* Generate random auth data */
+	ssl_initialize_random();
+	RAND_bytes(greeting.auth_plugin_data_part1, sizeof(greeting.auth_plugin_data_part1));
+	RAND_bytes(greeting.auth_plugin_data_part2, sizeof(greeting.auth_plugin_data_part2));
+
+	/* Send greeting packet */
+	buf = get_trash_chunk();
+	if (!buf) {
+		ha_alert("MySQL SSL: Failed to allocate buffer for server greeting\n");
+		return -1;
+	}
+
+	/* Add MySQL packet header (4 bytes: length + sequence) */
+	packet_len = sizeof(greeting);
+	header[0] = packet_len & 0xff;
+	header[1] = (packet_len >> 8) & 0xff;
+	header[2] = (packet_len >> 16) & 0xff;
+	header[3] = 0; /* sequence number */
+
+	memcpy(b_tail(buf), header, sizeof(header));
+	b_add(buf, sizeof(header));
+	memcpy(b_tail(buf), &greeting, sizeof(greeting));
+	b_add(buf, sizeof(greeting));
+
+	ret = conn_ctrl_send(conn, b_head(buf), b_data(buf), 0);
+	if (ret <= 0) {
+		ha_alert("MySQL SSL: Failed to send server greeting: %d\n", ret);
+		return -1;
+	}
+
+	return 0;
+}
+
+static int mysql_receive_ssl_request(struct connection *conn)
+{
+	struct mysql_ssl_request ssl_req;
+	struct buffer *buf;
+	int ret;
+	uint32_t packet_len;
+	uint8_t header[4];
+
+	/* Receive MySQL packet header */
+	buf = get_trash_chunk();
+	if (!buf) {
+		ha_alert("MySQL SSL: Failed to allocate buffer for SSL request\n");
+		return -1;
+	}
+
+	ret = recv(conn->handle.fd, b_tail(buf), b_room(buf), 0);
+	if (ret <= 0) {
+		ha_alert("MySQL SSL: Failed to receive SSL request header: %d\n", ret);
+		return -1;
+	}
+	b_add(buf, ret);
+
+	if (b_data(buf) < 4) {
+		ha_alert("MySQL SSL: Incomplete SSL request header\n");
+		return -1;
+	}
+
+	/* Parse packet header */
+	memcpy(header, b_head(buf), 4);
+	packet_len = header[0] | (header[1] << 8) | (header[2] << 16);
+	b_del(buf, 4);
+
+	/* Receive SSL request packet */
+	if (b_data(buf) < sizeof(ssl_req)) {
+		/* Need to receive more data */
+		ret = recv(conn->handle.fd, b_tail(buf), b_room(buf), 0);
+		if (ret <= 0) {
+			ha_alert("MySQL SSL: Failed to receive SSL request body: %d\n", ret);
+			return -1;
+		}
+		b_add(buf, ret);
+	}
+
+	if (b_data(buf) < sizeof(ssl_req)) {
+		ha_alert("MySQL SSL: Incomplete SSL request packet\n");
+		return -1;
+	}
+
+	/* Parse SSL request */
+	memcpy(&ssl_req, b_head(buf), sizeof(ssl_req));
+	b_del(buf, sizeof(ssl_req));
+
+	/* Verify SSL request */
+	if (!(ssl_req.capability_flags & MYSQL_CLIENT_SSL_FLAG)) {
+		ha_alert("MySQL SSL: Client does not support SSL\n");
+		return -1;
+	}
+
+	ha_notice("MySQL SSL: Received valid SSL request from client\n");
+	return 0;
+}
+
+
+static int mysql_send_ssl_request(struct connection *conn)
+{
+	struct mysql_ssl_request ssl_req;
+	struct buffer *buf;
+	int ret;
+	uint32_t packet_len;
+	uint8_t header[4];
+
+	/* Initialize SSL request packet */
+	memset(&ssl_req, 0, sizeof(ssl_req));
+	ssl_req.capability_flags = htonl(MYSQL_CLIENT_SSL_FLAG | 0x00000000); /* Basic capabilities + SSL */
+	ssl_req.max_packet_size = htonl(0x01000000); /* 16MB max packet size */
+	ssl_req.character_set = MYSQL_DEFAULT_CHARSET;
+
+	/* Send SSL request packet */
+	buf = get_trash_chunk();
+	if (!buf) {
+		ha_alert("MySQL SSL: Failed to allocate buffer for SSL request\n");
+		return -1;
+	}
+
+	/* Add MySQL packet header (4 bytes: length + sequence) */
+	packet_len = sizeof(ssl_req);
+	header[0] = packet_len & 0xff;
+	header[1] = (packet_len >> 8) & 0xff;
+	header[2] = (packet_len >> 16) & 0xff;
+	header[3] = 1; /* sequence number */
+
+	memcpy(b_tail(buf), header, sizeof(header));
+	b_add(buf, sizeof(header));
+	memcpy(b_tail(buf), &ssl_req, sizeof(ssl_req));
+	b_add(buf, sizeof(ssl_req));
+
+	ret = conn_ctrl_send(conn, b_head(buf), b_data(buf), 0);
+	if (ret <= 0) {
+		ha_alert("MySQL SSL: Failed to send SSL request: %d\n", ret);
+		return -1;
+	}
+
+	ha_notice("MySQL SSL: Sent SSL request to MySQL server\n");
+	return 0;
+}
+
+static int mysql_receive_server_greeting(struct connection *conn)
+{
+	struct mysql_server_greeting greeting;
+	struct buffer *buf;
+	int ret;
+	uint32_t packet_len;
+	uint8_t header[4];
+
+	/* Receive MySQL packet header */
+	buf = get_trash_chunk();
+	if (!buf) {
+		ha_alert("MySQL SSL: Failed to allocate buffer for server greeting\n");
+		return -1;
+	}
+
+	ret = recv(conn->handle.fd, b_tail(buf), b_room(buf), 0);
+	if (ret <= 0) {
+		ha_alert("MySQL SSL: Failed to receive server greeting header: %d\n", ret);
+		return -1;
+	}
+	b_add(buf, ret);
+
+	if (b_data(buf) < 4) {
+		ha_alert("MySQL SSL: Incomplete server greeting header\n");
+		return -1;
+	}
+
+	/* Parse packet header */
+	memcpy(header, b_head(buf), 4);
+	packet_len = header[0] | (header[1] << 8) | (header[2] << 16);
+	b_del(buf, 4);
+
+	/* Receive server greeting packet */
+	if (b_data(buf) < sizeof(greeting)) {
+		/* Need to receive more data */
+		ret = recv(conn->handle.fd, b_tail(buf), b_room(buf), 0);
+		if (ret <= 0) {
+			ha_alert("MySQL SSL: Failed to receive server greeting body: %d\n", ret);
+			return -1;
+		}
+		b_add(buf, ret);
+	}
+
+	if (b_data(buf) < sizeof(greeting)) {
+		ha_alert("MySQL SSL: Incomplete server greeting packet\n");
+		return -1;
+	}
+
+	/* Parse server greeting */
+	memcpy(&greeting, b_head(buf), sizeof(greeting));
+	b_del(buf, sizeof(greeting));
+
+	/* Verify server greeting */
+	if (greeting.protocol_version != MYSQL_PROTOCOL_VERSION) {
+		ha_alert("MySQL SSL: Invalid protocol version: %d\n", greeting.protocol_version);
+		return -1;
+	}
+
+	ha_notice("MySQL SSL: Received server greeting from MySQL server\n");
+	return 0;
+}
+
+static int mysql_ssl_pre_handshake(struct connection *conn)
+{
+	struct listener *li = NULL;
+	struct server *srv = NULL;
+
+	/* Check if this connection needs MySQL SSL pre-handshake */
+	if (obj_type(conn->target) == OBJ_TYPE_LISTENER) {
+		li = __objt_listener(conn->target);
+		if (!(li->bind_conf->options & BC_O_MYSQL_SSL))
+			return 0; /* Not MySQL SSL mode */
+	} else if (obj_type(conn->target) == OBJ_TYPE_SERVER) {
+		srv = __objt_server(conn->target);
+		if (!srv->mysql_ssl)
+			return 0; /* Not MySQL SSL mode */
+	} else {
+		return 0; /* Unknown target type */
+	}
+
+	ha_notice("MySQL SSL: Starting pre-handshake for %s\n", 
+		obj_type(conn->target) == OBJ_TYPE_LISTENER ? "listener" : "server");
+
+	/* For listener (client -> HAProxy): send greeting, receive SSL request */
+	if (obj_type(conn->target) == OBJ_TYPE_LISTENER) {
+		if (mysql_send_server_greeting(conn) < 0)
+			return -1;
+		if (mysql_receive_ssl_request(conn) < 0)
+			return -1;
+	}
+	/* For server (HAProxy -> MySQL): receive greeting, send SSL request */
+	else {
+		if (mysql_receive_server_greeting(conn) < 0)
+			return -1;
+		if (mysql_send_ssl_request(conn) < 0)
+			return -1;
+	}
+
+	return 0;
+}
+
+
+
 int nb_engines = 0;
 
 static struct eb_root cert_issuer_tree = EB_ROOT; /* issuers tree from "issuers-chain-path" */
@@ -6317,6 +6613,13 @@ static int ssl_sock_handshake(struct connection *conn, unsigned int flag)
 		/* read some data: consider handshake completed */
 		goto reneg_ok;
 	}
+
+	/* MySQL SSL pre-handshake: handle MySQL protocol before SSL handshake */
+	if (mysql_ssl_pre_handshake(conn) < 0) {
+		conn->err_code = CO_ER_SSL_HANDSHAKE;
+		goto out_error;
+	}
+
 	ret = SSL_do_handshake(ctx->ssl);
 check_error:
 	if (ret != 1) {

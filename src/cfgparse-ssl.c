@@ -1275,6 +1275,36 @@ static int bind_parse_ssl(char **args, int cur_arg, struct proxy *px, struct bin
 	return 0;
 }
 
+/* parse the "mysql-ssl" bind keyword */
+static int bind_parse_mysql_ssl(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
+{
+	/* Enable both SSL and MySQL SSL pre-handshake mode */
+	conf->options |= BC_O_USE_SSL | BC_O_MYSQL_SSL;
+
+	if (global_ssl.listen_default_ciphers && !conf->ssl_conf.ciphers)
+		conf->ssl_conf.ciphers = strdup(global_ssl.listen_default_ciphers);
+#if defined(SSL_CTX_set1_curves_list)
+	if (global_ssl.listen_default_curves && !conf->ssl_conf.curves)
+		conf->ssl_conf.curves = strdup(global_ssl.listen_default_curves);
+#endif
+#if defined(SSL_CTX_set1_sigalgs_list)
+	if (global_ssl.listen_default_sigalgs && !conf->ssl_conf.sigalgs)
+		conf->ssl_conf.sigalgs = strdup(global_ssl.listen_default_sigalgs);
+#endif
+#ifdef HAVE_SSL_CTX_SET_CIPHERSUITES
+	if (global_ssl.listen_default_ciphersuites && !conf->ssl_conf.ciphersuites)
+		conf->ssl_conf.ciphersuites = strdup(global_ssl.listen_default_ciphersuites);
+#endif
+	conf->ssl_options |= global_ssl.listen_default_ssloptions;
+	conf->ssl_conf.ssl_methods.flags |= global_ssl.listen_default_sslmethods.flags;
+	if (!conf->ssl_conf.ssl_methods.min)
+		conf->ssl_conf.ssl_methods.min = global_ssl.listen_default_sslmethods.min;
+	if (!conf->ssl_conf.ssl_methods.max)
+		conf->ssl_conf.ssl_methods.max = global_ssl.listen_default_sslmethods.max;
+
+	return 0;
+}
+
 /* parse the "prefer-client-ciphers" bind keyword */
 static int bind_parse_pcc(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
 {
@@ -1293,6 +1323,7 @@ static int bind_parse_generate_certs(char **args, int cur_arg, struct proxy *px,
 #endif
 	return 0;
 }
+
 
 /* parse the "strict-sni" bind keyword */
 static int bind_parse_strict_sni(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
@@ -1976,6 +2007,20 @@ static int srv_parse_ssl(char **args, int *cur_arg, struct proxy *px, struct ser
 	return 0;
 }
 
+/* parse the "mysql-ssl" server keyword */
+static int srv_parse_mysql_ssl(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
+{
+	/* Enable both SSL and MySQL SSL pre-handshake mode */
+	newsrv->use_ssl = 1;
+	newsrv->mysql_ssl = 1;
+	if (ssl_sock_init_srv(newsrv)) {
+		memprintf(err, "'%s' : not enough memory", args[*cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	return 0;
+}
+
 /* parse the "ssl-reuse" server keyword */
 static int srv_parse_ssl_reuse(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
 {
@@ -2260,6 +2305,7 @@ static struct bind_kw_list bind_kws = { "SSL", { }, {
 	{ "no-tlsv12",             bind_parse_tls_method_options, 0 }, /* disable TLSv12 */
 	{ "no-tlsv13",             bind_parse_tls_method_options, 0 }, /* disable TLSv13 */
 	{ "no-tls-tickets",        bind_parse_no_tls_tickets,     0 }, /* disable session resumption tickets */
+	{ "mysql-ssl",             bind_parse_mysql_ssl,         0 }, /* enable MySQL SSL pre-handshake mode */
 	{ "sigalgs",               bind_parse_sigalgs,            1 }, /* set SSL signature algorithms */
 	{ "ssl",                   bind_parse_ssl,                0 }, /* enable SSL processing */
 	{ "ssl-min-ver",           bind_parse_tls_method_minmax,  1 }, /* minimum version */
@@ -2310,6 +2356,7 @@ static struct srv_kw_list srv_kws = { "SSL", { }, {
 	{ "no-tlsv12",               srv_parse_tls_method_options, 0, 0, 1 }, /* disable TLSv12 */
 	{ "no-tlsv13",               srv_parse_tls_method_options, 0, 0, 1 }, /* disable TLSv13 */
 	{ "no-tls-tickets",          srv_parse_no_tls_tickets,     0, 1, 1 }, /* disable session resumption tickets */
+	{ "mysql-ssl",               srv_parse_mysql_ssl,          0, 1, 1 }, /* enable MySQL SSL pre-handshake mode */
 	{ "npn",                     srv_parse_npn,                1, 1, 1 }, /* Set NPN supported protocols */
 	{ "send-proxy-v2-ssl",       srv_parse_send_proxy_ssl,     0, 1, 1 }, /* send PROXY protocol header v2 with SSL info */
 	{ "send-proxy-v2-ssl-cn",    srv_parse_send_proxy_cn,      0, 1, 1 }, /* send PROXY protocol header v2 with CN */
