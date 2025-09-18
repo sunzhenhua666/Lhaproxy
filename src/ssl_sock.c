@@ -168,70 +168,50 @@ static int mysql_send_server_greeting(struct connection *conn, struct mysql_serv
 static int mysql_receive_ssl_request(struct connection *conn)
 {
 	struct mysql_ssl_request ssl_req;
-	struct buffer *buf;
 	int ret;
 	uint32_t packet_len;
 	uint8_t header[4];
-
-	/* Receive MySQL packet header */
-	buf = get_trash_chunk();
-	if (!buf) {
-		ha_alert("MySQL SSL: Failed to allocate buffer for SSL request\n");
-		return -1;
-	}
 
 	/* DIAGNOSTIC: Wait a moment for the client packet to arrive. */
 	/* This is a hack to work around the blocking-style implementation */
 	/* and should be replaced by a non-blocking state machine. */
 	usleep(10000); // 10ms sleep
-
-	ret = recv(conn->handle.fd, b_tail(buf), b_room(buf), 0);
-	if (ret <= 0) {
-		ha_alert("MySQL SSL: Failed to receive SSL request header: %d, errno: %d\n", ret, errno);
-		return -1;
-	}
-	b_add(buf, ret);
-
-
-	if (b_data(buf) < 4) {
-		ha_alert("MySQL SSL: Incomplete SSL request header\n");
+	
+	// Step 1: Read exactly 4 bytes for the MySQL packet header.
+	// Using MSG_WAITALL ensures we get all 4 bytes or fail, which also handles timing issues.
+	ret = recv(conn->handle.fd, header, 4, MSG_WAITALL);
+	if (ret != 4) {
+		ha_alert("MySQL SSL: Failed to receive SSL request header. ret: %d, errno: %d\n", ret, errno);
 		return -1;
 	}
 
-	/* Parse packet header */
-	memcpy(header, b_head(buf), 4);
+	// Step 2: Parse the header to get the packet body length.
 	packet_len = header[0] | (header[1] << 8) | (header[2] << 16);
-	b_del(buf, 4);
 
-	/* Receive SSL request packet */
-	if (b_data(buf) < sizeof(ssl_req)) {
-		/* Need to receive more data */
-		ret = recv(conn->handle.fd, b_tail(buf), b_room(buf), 0);
-		if (ret <= 0) {
-			ha_alert("MySQL SSL: Failed to receive SSL request body: %d\n", ret);
-			return -1;
-		}
-		b_add(buf, ret);
-	}
-
-	if (b_data(buf) < sizeof(ssl_req)) {
-		ha_alert("MySQL SSL: Incomplete SSL request packet\n");
+	// The MySQL SSL Request packet payload is always 32 bytes.
+	if (packet_len != sizeof(struct mysql_ssl_request)) {
+		ha_alert("MySQL SSL: Received SSL request with unexpected length: %u\n", packet_len);
 		return -1;
 	}
 
-	/* Parse SSL request */
-	memcpy(&ssl_req, b_head(buf), sizeof(ssl_req));
-	b_del(buf, sizeof(ssl_req));
+	// Step 3: Read exactly packet_len bytes for the packet body.
+	ret = recv(conn->handle.fd, &ssl_req, sizeof(ssl_req), MSG_WAITALL);
+	if (ret != sizeof(ssl_req)) {
+		ha_alert("MySQL SSL: Failed to receive SSL request body. ret: %d, errno: %d\n", ret, errno);
+		return -1;
+	}
 
-	/* Verify SSL request */
+	// Step 4: Verify the SSL request.
+	// The capability_flags field is little-endian in the protocol.
 	if (!(ssl_req.capability_flags & MYSQL_CLIENT_SSL_FLAG)) {
-		ha_alert("MySQL SSL: Client does not support SSL\n");
+		ha_alert("MySQL SSL: Client does not support SSL (capability flags: 0x%x)\n", ssl_req.capability_flags);
 		return -1;
 	}
 
 	ha_notice("MySQL SSL: Received valid SSL request from client\n");
 	return 0;
 }
+
 
 
 static int mysql_send_ssl_request(struct connection *conn)
@@ -467,6 +447,7 @@ static int mysql_ssl_pre_handshake(struct connection *conn)
 			}
 
 			close(backend_sock);
+			conn->mysql_ssl_pre_handshake_done = 1;
 			return 0; // Pre-handshake complete
 		} else {
 			ha_alert("MySQL SSL: mysql-server-addr is not configured for mysql-ssl mode.\n");
@@ -6710,10 +6691,11 @@ static int ssl_sock_handshake(struct connection *conn, unsigned int flag)
 	}
 
 	/* MySQL SSL pre-handshake: handle MySQL protocol before SSL handshake */
-	if (mysql_ssl_pre_handshake(conn) < 0) {
+	if (!conn->mysql_ssl_pre_handshake_done && mysql_ssl_pre_handshake(conn) < 0) {
 		conn->err_code = CO_ER_SSL_HANDSHAKE;
 		goto out_error;
 	}
+
 
 	ret = SSL_do_handshake(ctx->ssl);
 check_error:

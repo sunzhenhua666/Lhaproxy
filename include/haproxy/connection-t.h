@@ -553,6 +553,8 @@ struct conn_tlv_list {
  * connections, but other methods for applets.
  */
 struct connection {
+	/* internal, used to detect mysql ssl request */
+	int mysql_ssl_pre_handshake_done; 
 	/* first cache line */
 	enum obj_type obj_type;       /* differentiates connection from applet context */
 	unsigned char err_code;       /* CO_ER_* */
