@@ -132,30 +132,11 @@ struct mysql_ssl_request {
 
 /* MySQL Protocol Helper Functions */
 
-static int mysql_send_server_greeting(struct connection *conn)
+static int mysql_send_server_greeting(struct connection *conn, struct mysql_server_greeting *greeting, uint32_t packet_len)
 {
-	struct mysql_server_greeting greeting;
 	struct buffer *buf;
 	int ret;
-	uint32_t packet_len;
 	uint8_t header[4];
-
-	/* Initialize greeting packet */
-	memset(&greeting, 0, sizeof(greeting));
-	greeting.protocol_version = MYSQL_PROTOCOL_VERSION;
-	strncpy(greeting.server_version, MYSQL_SERVER_VERSION, sizeof(greeting.server_version) - 1);
-	greeting.connection_id = htonl(1); /* Simple connection ID */
-	greeting.capability_flags_low = htons(0x0000); /* Basic capabilities */
-	greeting.character_set = MYSQL_DEFAULT_CHARSET;
-	greeting.status_flags = htons(0x0002); /* SERVER_STATUS_AUTOCOMMIT */
-	greeting.capability_flags_high = htons(0x0000);
-	greeting.auth_plugin_data_len = 21;
-	strncpy(greeting.auth_plugin_name, "mysql_native_password", sizeof(greeting.auth_plugin_name) - 1);
-
-	/* Generate random auth data */
-	ssl_initialize_random();
-	RAND_bytes(greeting.auth_plugin_data_part1, sizeof(greeting.auth_plugin_data_part1));
-	RAND_bytes(greeting.auth_plugin_data_part2, sizeof(greeting.auth_plugin_data_part2));
 
 	/* Send greeting packet */
 	buf = get_trash_chunk();
@@ -165,7 +146,6 @@ static int mysql_send_server_greeting(struct connection *conn)
 	}
 
 	/* Add MySQL packet header (4 bytes: length + sequence) */
-	packet_len = sizeof(greeting);
 	header[0] = packet_len & 0xff;
 	header[1] = (packet_len >> 8) & 0xff;
 	header[2] = (packet_len >> 16) & 0xff;
@@ -173,8 +153,8 @@ static int mysql_send_server_greeting(struct connection *conn)
 
 	memcpy(b_tail(buf), header, sizeof(header));
 	b_add(buf, sizeof(header));
-	memcpy(b_tail(buf), &greeting, sizeof(greeting));
-	b_add(buf, sizeof(greeting));
+	memcpy(b_tail(buf), greeting, packet_len);
+	b_add(buf, packet_len);
 
 	ret = conn_ctrl_send(conn, b_head(buf), b_data(buf), 0);
 	if (ret <= 0) {
@@ -200,12 +180,18 @@ static int mysql_receive_ssl_request(struct connection *conn)
 		return -1;
 	}
 
+	/* DIAGNOSTIC: Wait a moment for the client packet to arrive. */
+	/* This is a hack to work around the blocking-style implementation */
+	/* and should be replaced by a non-blocking state machine. */
+	usleep(10000); // 10ms sleep
+
 	ret = recv(conn->handle.fd, b_tail(buf), b_room(buf), 0);
 	if (ret <= 0) {
-		ha_alert("MySQL SSL: Failed to receive SSL request header: %d\n", ret);
+		ha_alert("MySQL SSL: Failed to receive SSL request header: %d, errno: %d\n", ret, errno);
 		return -1;
 	}
 	b_add(buf, ret);
+
 
 	if (b_data(buf) < 4) {
 		ha_alert("MySQL SSL: Incomplete SSL request header\n");
@@ -376,10 +362,116 @@ static int mysql_ssl_pre_handshake(struct connection *conn)
 
 	/* For listener (client -> HAProxy): send greeting, receive SSL request */
 	if (obj_type(conn->target) == OBJ_TYPE_LISTENER) {
-		if (mysql_send_server_greeting(conn) < 0)
+		/* Access the address and port from bind_conf */
+		if (li && li->bind_conf->mysql_server_addr) {
+			ha_notice("MySQL SSL: Target server address: %s\n", li->bind_conf->mysql_server_addr);
+
+			/**************************************************************************
+			 * CONCEPTUAL IMPLEMENTATION: Connect to backend and get Greeting
+			 * WARNING: The following code uses blocking sockets for demonstration.
+			 * In a real HAProxy implementation, this must be converted to a
+			 * non-blocking state machine using HAProxy's I/O event system.
+			 **************************************************************************/
+			struct addrinfo hints, *res, *p;
+			int backend_sock = -1, ret;
+			char *host, *port, *addr_copy;
+
+			addr_copy = strdup(li->bind_conf->mysql_server_addr);
+			if (!addr_copy) return -1; // Out of memory
+
+			host = addr_copy;
+			port = strrchr(addr_copy, ':');
+			if (port) {
+				*port = '\0';
+				port++;
+			}
+
+			if (!port || !*port) {
+				ha_alert("MySQL SSL: Port not specified in mysql-server-addr\n");
+				free(addr_copy);
+				return -1;
+			}
+
+			memset(&hints, 0, sizeof(hints));
+			hints.ai_family = AF_UNSPEC; // IPv4 or IPv6
+			hints.ai_socktype = SOCK_STREAM;
+
+			if (getaddrinfo(host, port, &hints, &res) != 0) {
+				ha_alert("MySQL SSL: getaddrinfo failed for %s\n", li->bind_conf->mysql_server_addr);
+				free(addr_copy);
+				return -1;
+			}
+
+			for (p = res; p != NULL; p = p->ai_next) {
+				backend_sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+				if (backend_sock == -1) continue;
+				if (connect(backend_sock, p->ai_addr, p->ai_addrlen) != -1) break; // Success
+				close(backend_sock);
+				backend_sock = -1;
+			}
+			freeaddrinfo(res);
+			free(addr_copy);
+
+			if (p == NULL) {
+				ha_alert("MySQL SSL: Failed to connect to backend server %s\n", li->bind_conf->mysql_server_addr);
+				return -1;
+			}
+
+			ha_notice("MySQL SSL: Successfully connected to backend.\n");
+
+			unsigned char header[4];
+			ret = recv(backend_sock, header, 4, 0);
+			if (ret == 4) {
+				uint32_t packet_len = header[0] | (header[1] << 8) | (header[2] << 16);
+				unsigned char *packet_buf = malloc(packet_len);
+				if (packet_buf) {
+					ret = recv(backend_sock, packet_buf, packet_len, MSG_WAITALL);
+					if (ret == packet_len) {
+						struct mysql_server_greeting greeting;
+						uint16_t caps;
+						memcpy(&greeting, packet_buf, sizeof(greeting) < packet_len ? sizeof(greeting) : packet_len);
+
+						// 1. Print greeting fields for debugging
+						ha_notice("MySQL SSL: Received Greeting. Proto:%d, Ver:%s, ConnID:%u, Charset:%d, Status:%u\n",
+							  greeting.protocol_version, greeting.server_version,
+							  ntohl(greeting.connection_id), greeting.character_set, ntohs(greeting.status_flags));
+
+						// 2. Add SSL capability to the greeting packet
+						caps = ntohs(greeting.capability_flags_low);
+						caps |= MYSQL_CLIENT_SSL_FLAG;
+						greeting.capability_flags_low = htons(caps);
+						ha_notice("MySQL SSL: Added SSL capability to greeting packet.\n");
+
+						// 3. Send the MODIFIED greeting to the client
+						if (mysql_send_server_greeting(conn, &greeting, packet_len) < 0) {
+							free(packet_buf);
+							close(backend_sock);
+							return -1;
+						}
+
+						// 4. Receive the client's SSL request
+						if (mysql_receive_ssl_request(conn) < 0) {
+							free(packet_buf);
+							close(backend_sock);
+							return -1;
+						}
+					} else {
+						ha_alert("MySQL SSL: Failed to receive greeting body.\n");
+					}
+					free(packet_buf);
+				} else {
+					ha_alert("MySQL SSL: Failed to allocate memory for greeting packet.\n");
+				}
+			} else {
+				ha_alert("MySQL SSL: Failed to receive greeting header.\n");
+			}
+
+			close(backend_sock);
+			return 0; // Pre-handshake complete
+		} else {
+			ha_alert("MySQL SSL: mysql-server-addr is not configured for mysql-ssl mode.\n");
 			return -1;
-		if (mysql_receive_ssl_request(conn) < 0)
-			return -1;
+		}
 	}
 	/* For server (HAProxy -> MySQL): receive greeting, send SSL request */
 	else {
@@ -391,6 +483,9 @@ static int mysql_ssl_pre_handshake(struct connection *conn)
 
 	return 0;
 }
+
+
+
 
 
 

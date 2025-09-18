@@ -1302,6 +1302,26 @@ static int bind_parse_mysql_ssl(char **args, int cur_arg, struct proxy *px, stru
 	if (!conf->ssl_conf.ssl_methods.max)
 		conf->ssl_conf.ssl_methods.max = global_ssl.listen_default_sslmethods.max;
 
+	/* check for optional address */
+	printf("%s:%d bind_find_kw:%s\n", __func__, __LINE__, args[cur_arg + 1]);
+
+	if (args[cur_arg + 1] && !bind_find_kw(args[cur_arg + 1])) {
+		conf->mysql_server_addr = strdup(args[cur_arg + 1]);
+		if (!conf->mysql_server_addr) {
+			printf("%s:%d \n", __func__, __LINE__);
+			memprintf(err, "out of memory");
+			printf("%s:%d \n", __func__, __LINE__);
+			return ERR_ALERT | ERR_FATAL;
+		}
+		/* consume argument by shifting the rest of the array */
+		int i;
+		for (i = cur_arg + 1; *args[i]; i++) {
+			args[i] = args[i+1];
+			printf("%s:%d argv[%d]:%s\n", __func__, __LINE__, i, args[i]);
+
+		}
+	}
+
 	return 0;
 }
 
