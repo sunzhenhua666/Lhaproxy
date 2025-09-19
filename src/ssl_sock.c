@@ -130,6 +130,100 @@ struct mysql_ssl_request {
 	uint8_t reserved[23];
 } __attribute__((packed));
 
+/*
+ * Data structure for caching MySQL SSL Request packets, indexed by server address.
+ */
+struct mysql_ssl_request_node {
+    char *server_addr;
+    struct mysql_ssl_request ssl_request;
+    struct mysql_ssl_request_node *next;
+};
+
+static struct mysql_ssl_request_node *ssl_request_list_head = NULL;
+
+/*
+ * Finds an SSL request packet in the list by server address.
+ */
+static struct mysql_ssl_request_node* find_ssl_request(const char *server_addr)
+{
+    struct mysql_ssl_request_node *curr = ssl_request_list_head;
+    while (curr) {
+        if (strcmp(curr->server_addr, server_addr) == 0) {
+            return curr;
+        }
+        curr = curr->next;
+    }
+    return NULL;
+}
+
+/*
+ * Adds a new SSL request to the list, or updates it if the server address already exists.
+ */
+static int add_or_update_ssl_request(const char *server_addr, const struct mysql_ssl_request *req)
+{
+    struct mysql_ssl_request temp_req = *req;
+
+    // Remove the SSL flag before caching, as requested.
+    temp_req.capability_flags &= ~MYSQL_CLIENT_SSL_FLAG;
+
+    struct mysql_ssl_request_node *node = find_ssl_request(server_addr);
+    if (node) {
+        // Found, update existing node
+        node->ssl_request = temp_req;
+        ha_notice("MySQL SSL: Updated SSL request for server %s\n", server_addr);
+        return 0;
+    }
+
+    // Not found, create a new node
+    node = (struct mysql_ssl_request_node *)malloc(sizeof(struct mysql_ssl_request_node));
+    if (!node) {
+        ha_alert("MySQL SSL: Failed to allocate memory for SSL request node\n");
+        return -1;
+    }
+
+    // Use strdup to create a copy of the address for safe memory management.
+    node->server_addr = strdup(server_addr);
+    if (!node->server_addr) {
+        ha_alert("MySQL SSL: Failed to duplicate server address for SSL request node\n");
+        free(node);
+        return -1;
+    }
+    
+    node->ssl_request = temp_req;
+    node->next = ssl_request_list_head;
+    ssl_request_list_head = node;
+
+    ha_notice("MySQL SSL: Added new SSL request for server %s\n", server_addr);
+    return 0;
+}
+
+/*
+ * Deletes an SSL request packet from the list by server address.
+ */
+static int delete_ssl_request(const char *server_addr)
+{
+    struct mysql_ssl_request_node *curr = ssl_request_list_head;
+    struct mysql_ssl_request_node *prev = NULL;
+
+    while (curr) {
+        if (strcmp(curr->server_addr, server_addr) == 0) {
+            if (prev) {
+                prev->next = curr->next;
+            } else {
+                ssl_request_list_head = curr->next;
+            }
+            free(curr->server_addr);
+            free(curr);
+            ha_notice("MySQL SSL: Deleted SSL request for server %s\n", server_addr);
+            return 1; // Found and deleted
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+    return 0; // Not found
+}
+
+
 /* MySQL Protocol Helper Functions */
 
 static int mysql_send_server_greeting(struct connection *conn, struct mysql_server_greeting *greeting, uint32_t packet_len)
@@ -165,7 +259,7 @@ static int mysql_send_server_greeting(struct connection *conn, struct mysql_serv
 	return 0;
 }
 
-static int mysql_receive_ssl_request(struct connection *conn)
+static int mysql_receive_ssl_request(struct connection *conn, const char *mysql_server_addr)
 {
 	struct mysql_ssl_request ssl_req;
 	int ret;
@@ -176,7 +270,7 @@ static int mysql_receive_ssl_request(struct connection *conn)
 	/* This is a hack to work around the blocking-style implementation */
 	/* and should be replaced by a non-blocking state machine. */
 	usleep(10000); // 10ms sleep
-	
+
 	// Step 1: Read exactly 4 bytes for the MySQL packet header.
 	// Using MSG_WAITALL ensures we get all 4 bytes or fail, which also handles timing issues.
 	ret = recv(conn->handle.fd, header, 4, MSG_WAITALL);
@@ -209,9 +303,15 @@ static int mysql_receive_ssl_request(struct connection *conn)
 	}
 
 	ha_notice("MySQL SSL: Received valid SSL request from client\n");
+
+	// step 5: Cache the SSL request for future reuse.
+	if (add_or_update_ssl_request(mysql_server_addr, &ssl_req) < 0) {
+		ha_alert("MySQL SSL: Failed to cache SSL request for server %s\n", mysql_server_addr);
+		return -1;
+	}
+	
 	return 0;
 }
-
 
 
 static int mysql_send_ssl_request(struct connection *conn)
@@ -430,7 +530,7 @@ static int mysql_ssl_pre_handshake(struct connection *conn)
 						}
 
 						// 4. Receive the client's SSL request
-						if (mysql_receive_ssl_request(conn) < 0) {
+						if (mysql_receive_ssl_request(conn, li->bind_conf->mysql_server_addr) < 0) {
 							free(packet_buf);
 							close(backend_sock);
 							return -1;
@@ -6151,6 +6251,9 @@ void ssl_sock_destroy_bind_conf(struct bind_conf *bind_conf)
 	bind_conf->keys_ref = NULL;
 	bind_conf->ca_sign_pass = NULL;
 	bind_conf->ca_sign_file = NULL;
+	
+	free(bind_conf->mysql_server_addr);
+	bind_conf->mysql_server_addr = NULL;
 }
 
 /* Load CA cert file and private key used to generate certificates */
