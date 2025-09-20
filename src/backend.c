@@ -58,6 +58,7 @@
 #include <haproxy/ticks.h>
 #include <haproxy/time.h>
 #include <haproxy/trace.h>
+#include <haproxy/mysql.h>
 
 #define TRACE_SOURCE &trace_strm
 
@@ -1386,6 +1387,11 @@ int connect_server(struct stream *s)
 	 * it can be NULL for dispatch mode or transparent backend */
 	srv = objt_server(s->target);
 
+	if (srv && (srv->flags & SRV_F_MYSQL_TCP)) {
+		s->scb->flags |= SC_FL_MYSQL_SPOOF;
+		printf("%s:%d:----------SC_FL_MYSQL_SPOOF\n", __func__, __LINE__); 
+	}
+
 	/* Override reuse-mode if reverse-connect is used. */
 	if (srv && srv->flags & SRV_F_RHTTP)
 		reuse_mode = PR_O_REUSE_ALWS;
@@ -2533,12 +2539,28 @@ void back_handle_st_rdy(struct stream *s)
 			goto end;
 		}
 	}
+	
+	if (sc->flags & SC_FL_MYSQL_SPOOF) {
+		int ret = 0;
+		ret = mysql_process_handshake(s);
+		if (ret == 1) {
+			sc->flags &= ~SC_FL_MYSQL_SPOOF;
+		} else if (ret == 0) {
+			goto end;
+		} else {
+			sc->flags |= SC_FL_ERROR;
+			sc->state = SC_ST_CER;
+			DBG_TRACE_STATE("mysql handshake error", STRM_EV_STRM_PROC|STRM_EV_CS_ST|STRM_EV_STRM_ERR, s);
+			goto end;
+		}
+	}
 
 	/* data were sent and/or we had no error, back_establish() will
 	 * now take over.
 	 */
 	DBG_TRACE_STATE("connection established", STRM_EV_STRM_PROC|STRM_EV_CS_ST, s);
 	s->conn_err_type = STRM_ET_NONE;
+    printf("%s:%d:----------SC_ST_EST\n", __func__, __LINE__); 
 	sc->state = SC_ST_EST;
 
   end:

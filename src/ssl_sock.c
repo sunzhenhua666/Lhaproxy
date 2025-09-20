@@ -86,7 +86,7 @@
 #include <haproxy/istbuf.h>
 #include <haproxy/ssl_ocsp.h>
 
-
+#include <haproxy/mysql.h>
 /* ***** READ THIS before adding code here! *****
  *
  * Due to API incompatibilities between multiple OpenSSL versions and their
@@ -98,135 +98,11 @@
  * to conditionally define it in openssl-compat.h than using lots of ifdefs.
  */
 
-/* MySQL Protocol Constants */
-#define MYSQL_PROTOCOL_VERSION 10
-#define MYSQL_SERVER_VERSION "8.0.35-HAProxy-MySQL-SSL"
-#define MYSQL_DEFAULT_CHARSET 33  /* utf8_general_ci */
-#define MYSQL_CLIENT_SSL_FLAG 0x0800
-#define MYSQL_SSL_REQUEST_SIZE 32
-
-/* MySQL Server Greeting Packet Structure */
-struct mysql_server_greeting {
-	uint8_t protocol_version;
-	char server_version[256];
-	uint32_t connection_id;
-	uint8_t auth_plugin_data_part1[8];
-	uint8_t filler;
-	uint16_t capability_flags_low;
-	uint8_t character_set;
-	uint16_t status_flags;
-	uint16_t capability_flags_high;
-	uint8_t auth_plugin_data_len;
-	uint8_t reserved[10];
-	uint8_t auth_plugin_data_part2[12];
-	char auth_plugin_name[21];
-} __attribute__((packed));
-
-/* MySQL SSL Request Packet Structure */
-struct mysql_ssl_request {
-	uint32_t capability_flags;
-	uint32_t max_packet_size;
-	uint8_t character_set;
-	uint8_t reserved[23];
-} __attribute__((packed));
-
-/*
- * Data structure for caching MySQL SSL Request packets, indexed by server address.
- */
-struct mysql_ssl_request_node {
-    char *server_addr;
-    struct mysql_ssl_request ssl_request;
-    struct mysql_ssl_request_node *next;
-};
-
-static struct mysql_ssl_request_node *ssl_request_list_head = NULL;
-
-/*
- * Finds an SSL request packet in the list by server address.
- */
-static struct mysql_ssl_request_node* find_ssl_request(const char *server_addr)
-{
-    struct mysql_ssl_request_node *curr = ssl_request_list_head;
-    while (curr) {
-        if (strcmp(curr->server_addr, server_addr) == 0) {
-            return curr;
-        }
-        curr = curr->next;
-    }
-    return NULL;
-}
-
-/*
- * Adds a new SSL request to the list, or updates it if the server address already exists.
- */
-static int add_or_update_ssl_request(const char *server_addr, const struct mysql_ssl_request *req)
-{
-    struct mysql_ssl_request temp_req = *req;
-
-    // Remove the SSL flag before caching, as requested.
-    temp_req.capability_flags &= ~MYSQL_CLIENT_SSL_FLAG;
-
-    struct mysql_ssl_request_node *node = find_ssl_request(server_addr);
-    if (node) {
-        // Found, update existing node
-        node->ssl_request = temp_req;
-        ha_notice("MySQL SSL: Updated SSL request for server %s\n", server_addr);
-        return 0;
-    }
-
-    // Not found, create a new node
-    node = (struct mysql_ssl_request_node *)malloc(sizeof(struct mysql_ssl_request_node));
-    if (!node) {
-        ha_alert("MySQL SSL: Failed to allocate memory for SSL request node\n");
-        return -1;
-    }
-
-    // Use strdup to create a copy of the address for safe memory management.
-    node->server_addr = strdup(server_addr);
-    if (!node->server_addr) {
-        ha_alert("MySQL SSL: Failed to duplicate server address for SSL request node\n");
-        free(node);
-        return -1;
-    }
-    
-    node->ssl_request = temp_req;
-    node->next = ssl_request_list_head;
-    ssl_request_list_head = node;
-
-    ha_notice("MySQL SSL: Added new SSL request for server %s\n", server_addr);
-    return 0;
-}
-
-/*
- * Deletes an SSL request packet from the list by server address.
- */
-static int delete_ssl_request(const char *server_addr)
-{
-    struct mysql_ssl_request_node *curr = ssl_request_list_head;
-    struct mysql_ssl_request_node *prev = NULL;
-
-    while (curr) {
-        if (strcmp(curr->server_addr, server_addr) == 0) {
-            if (prev) {
-                prev->next = curr->next;
-            } else {
-                ssl_request_list_head = curr->next;
-            }
-            free(curr->server_addr);
-            free(curr);
-            ha_notice("MySQL SSL: Deleted SSL request for server %s\n", server_addr);
-            return 1; // Found and deleted
-        }
-        prev = curr;
-        curr = curr->next;
-    }
-    return 0; // Not found
-}
 
 
 /* MySQL Protocol Helper Functions */
 
-static int mysql_send_server_greeting(struct connection *conn, struct mysql_server_greeting *greeting, uint32_t packet_len)
+int mysql_send_server_greeting(struct connection *conn, struct mysql_server_greeting *greeting, uint32_t packet_len)
 {
 	struct buffer *buf;
 	int ret;
@@ -259,7 +135,7 @@ static int mysql_send_server_greeting(struct connection *conn, struct mysql_serv
 	return 0;
 }
 
-static int mysql_receive_ssl_request(struct connection *conn, const char *mysql_server_addr)
+int mysql_receive_ssl_request(struct connection *conn, const char *mysql_server_addr)
 {
 	struct mysql_ssl_request ssl_req;
 	int ret;
@@ -521,6 +397,16 @@ static int mysql_ssl_pre_handshake(struct connection *conn)
 						caps |= MYSQL_CLIENT_SSL_FLAG;
 						greeting.capability_flags_low = htons(caps);
 						ha_notice("MySQL SSL: Added SSL capability to greeting packet.\n");
+
+						// 1.5. Store complete greeting packet for later processing
+						size_t complete_packet_size = packet_len + 4; // header + body
+						char *complete_packet = malloc(complete_packet_size);
+						if (complete_packet) {
+							memcpy(complete_packet, header, 4);
+							memcpy(complete_packet + 4, packet_buf, packet_len);
+							mysql_store_greeting_data(complete_packet, complete_packet_size);
+							free(complete_packet);
+						}
 
 						// 3. Send the MODIFIED greeting to the client
 						if (mysql_send_server_greeting(conn, &greeting, packet_len) < 0) {

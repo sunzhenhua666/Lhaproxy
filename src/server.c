@@ -962,6 +962,30 @@ static int srv_parse_ws(char **args, int *cur_arg,
 	return 0;
 }
 
+/* Parse the "mysql-tcp" server keyword */
+static int srv_parse_mysql_tcp(char **args, int *cur_arg,
+                               struct proxy *curproxy, struct server *newsrv, char **err)
+{
+	char *arg = args[*cur_arg + 1];
+	if (!*arg) {
+		memprintf(err, "'mysql-tcp' expects <ip>:<port> as argument.\n");
+		return ERR_ALERT | ERR_FATAL;
+	}
+	newsrv->flags |= SRV_F_MYSQL_TCP;
+	free(newsrv->mysql_tcp_lookup_addr);
+	newsrv->mysql_tcp_lookup_addr = strdup(arg);
+	if (!newsrv->mysql_tcp_lookup_addr) {
+		printf("%s:%d:----------\n", __func__, __LINE__);
+
+		memprintf(err, "out of memory.\n");
+		return ERR_ALERT | ERR_FATAL;
+	}
+	printf("%s:%d:----------newsrv->mysql_tcp_lookup_addr: %s\n", __func__, __LINE__, newsrv->mysql_tcp_lookup_addr);
+	
+	return 0;
+}
+
+
 /* Parse the "init-addr" server keyword */
 static int srv_parse_init_addr(char **args, int *cur_arg,
                                struct proxy *curproxy, struct server *newsrv, char **err)
@@ -2237,6 +2261,7 @@ static struct srv_kw_list srv_kws = { "ALL", { }, {
 	{ "disabled",             srv_parse_disabled,             0,  1,  1 }, /* Start the server in 'disabled' state */
 	{ "enabled",              srv_parse_enabled,              0,  1,  1 }, /* Start the server in 'enabled' state */
 	{ "error-limit",          srv_parse_error_limit,          1,  1,  1 }, /* Configure the consecutive count of check failures to consider a server on error */
+	{ "mysql-tcp",            srv_parse_mysql_tcp,            1,  1,  1 }, /* mysql tcp client spoofing */
 	{ "ws",                   srv_parse_ws,                   1,  1,  1 }, /* websocket protocol */
 	{ "id",                   srv_parse_id,                   1,  0,  1 }, /* set id# of server */
 	{ "init-addr",            srv_parse_init_addr,            1,  1,  0 }, /* */

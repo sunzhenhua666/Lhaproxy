@@ -188,6 +188,8 @@ enum sc_flags {
 	SC_FL_SHUT_DONE     = 0x00020000,  /* A shutdown was performed for the SC */
 
 	SC_FL_EOS           = 0x00040000,  /* End of stream was reached (from down side to up side) */
+
+	SC_FL_MYSQL_SPOOF   = 0x00080000,  /* mysql-tcp: client spoofing in progress */
 };
 
 /* This function is used to report flags in debugging tools. Please reflect
@@ -228,6 +230,9 @@ enum sc_state {
 	SC_ST_RDY,               /* [transient] ready proven after I/O success during SC_ST_CON */
 	SC_ST_EST,               /* connection established (resource exists) */
 	SC_ST_DIS,               /* [transient] disconnected from other side, but cleanup not done yet */
+	SC_ST_MYSQL_RECV_GREET,  /* mysql-tcp: waiting to receive greeting from backend */
+    SC_ST_MYSQL_PREP_SPOOF,  /* mysql-tcp: preparing to send spoofed client request */	
+	SC_ST_MYSQL_SEND_SPOOF,  /* mysql-tcp: waiting to send spoofed client request */
 	SC_ST_CLO,               /* SC closed, might not existing anymore. Buffers shut. */
 } __attribute__((packed));
 
@@ -319,6 +324,18 @@ struct stconn {
 	const struct sc_app_ops *app_ops;    /* general operations used at the app layer */
 	struct sockaddr_storage *src;        /* source address (pool), when known, otherwise NULL */
 	struct sockaddr_storage *dst;        /* destination address (pool), when known, otherwise NULL */
+
+	/* mysql handshake */
+	int mysql_handshake_step; // 0=未开始, 1=正在接收, 2=正在发送
+	int greeting_size;
+	int greeting_bytes_to_receive;
+	int ssl_size;
+	int ssl_bytes_to_send;
+	int mysql_handshake_retries; // 防止无限循环的重试计数器
+	char *mysql_greeting_data; // 存储greeting包的原始数据
+	size_t mysql_greeting_length; // greeting包的长度
+	/* mysql handshake -- end */
+	
 };
 
 

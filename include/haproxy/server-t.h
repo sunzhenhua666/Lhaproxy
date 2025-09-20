@@ -158,6 +158,7 @@ enum srv_initaddr {
 #define SRV_F_NON_PURGEABLE 0x2000       /* this server cannot be removed at runtime */
 #define SRV_F_DEFSRV_USE_SSL 0x4000      /* default-server uses SSL */
 #define SRV_F_DELETED 0x8000             /* srv is deleted but not yet purged */
+#define SRV_F_MYSQL_TCP    0x10000       /* this server uses mysql-tcp client spoofing */
 
 /* configured server options for send-proxy (server->pp_opts) */
 #define SRV_PP_V1               0x0001   /* proxy protocol version 1 */
@@ -397,6 +398,7 @@ struct server {
 	int hostname_dn_len;			/* string length of the server hostname in Domain Name format */
 	char *hostname_dn;			/* server hostname in Domain Name format */
 	char *hostname;				/* server hostname */
+	char *mysql_tcp_lookup_addr;            /* address for mysql-tcp ssl_request cache lookup */
 	struct sockaddr_storage init_addr;	/* plain IP address specified on the init-addr line */
 	unsigned int init_addr_methods;		/* initial address setting, 3-bit per method, ends at 0, enough to store 10 entries */
 	enum srv_log_proto log_proto;		/* used proto to emit messages on server lines from log or ring section */

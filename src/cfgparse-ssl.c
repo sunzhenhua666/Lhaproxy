@@ -2376,7 +2376,7 @@ static struct srv_kw_list srv_kws = { "SSL", { }, {
 	{ "no-tlsv12",               srv_parse_tls_method_options, 0, 0, 1 }, /* disable TLSv12 */
 	{ "no-tlsv13",               srv_parse_tls_method_options, 0, 0, 1 }, /* disable TLSv13 */
 	{ "no-tls-tickets",          srv_parse_no_tls_tickets,     0, 1, 1 }, /* disable session resumption tickets */
-	{ "mysql-ssl",               srv_parse_mysql_ssl,          0, 1, 1 }, /* enable MySQL SSL pre-handshake mode */
+	//{ "mysql-ssl",               srv_parse_mysql_ssl,          0, 1, 1 }, /* enable MySQL SSL pre-handshake mode */
 	{ "npn",                     srv_parse_npn,                1, 1, 1 }, /* Set NPN supported protocols */
 	{ "send-proxy-v2-ssl",       srv_parse_send_proxy_ssl,     0, 1, 1 }, /* send PROXY protocol header v2 with SSL info */
 	{ "send-proxy-v2-ssl-cn",    srv_parse_send_proxy_cn,      0, 1, 1 }, /* send PROXY protocol header v2 with CN */
