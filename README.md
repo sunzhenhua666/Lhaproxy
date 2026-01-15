@@ -1,0 +1,2 @@
+# Lhaproxy
+learn haproxy
