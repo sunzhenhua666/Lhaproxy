@@ -50,6 +50,12 @@ static void tcp_enable_listener(struct listener *listener);
 static void tcp_disable_listener(struct listener *listener);
 
 /* Note: must not be declared <const> as its list will be overwritten */
+/*
+将 TCPv4 的功能封装成 struct protocol proto_tcpv4，其本质意义在于将 TCPv4 协议的“能力”实例化为一个符合 HAProxy 通用协议接口的对象。
+
+这是一种面向接口编程的体现，它允许 HAProxy 的核心框架以一种统一、抽象的方式来操作各种不同的底层通信协议，从而大大提高了代码的可维护性、可扩展性和复用性。proto_tcpv4 和 proto_tcpv6 就是这个设计模式下，针对 TCP
+ 协议的两个具体实例。
+*/
 struct protocol proto_tcpv4 = {
 	.name           = "tcpv4",
 

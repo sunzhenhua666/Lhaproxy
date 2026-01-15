@@ -132,7 +132,7 @@ uint64_t now_cpu_time_thread(int thr)
 	return ret;
 }
 
-/* set the clock source for the local thread */
+/* set the clock source for the local thread 为 每个线程创建属于自己的 CPU 时间计时器（clock） */
 void clock_set_local_source(void)
 {
 #if defined(_POSIX_TIMERS) && (_POSIX_TIMERS > 0) && defined(_POSIX_THREAD_CPUTIME) && (_POSIX_THREAD_CPUTIME >= 0)

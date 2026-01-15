@@ -396,7 +396,9 @@ static int thread_cpus_enabled()
 	ret = (int)sysconf(_SC_NPROCESSORS_ONLN);
 #endif
 #endif
+    printf("[%s:%d] -- returns the number (%d)of CPUs the current process is enabled to run on", __func__, __LINE__, ret);
 	ret = MAX(ret, 1);
+    printf("[%s:%d]returns the number (%d)of CPUs the current process is enabled to run on", __func__, __LINE__, ret);
 	return ret;
 }
 
@@ -1096,7 +1098,7 @@ static void __thread_init(void)
 
 	thread_cpus_enabled_at_boot = thread_cpus_enabled();
 	thread_cpus_enabled_at_boot = MIN(thread_cpus_enabled_at_boot, MAX_THREADS);
-
+    printf("[%s:%d]Built with multi-threading support (MAX_TGROUPS=%d, MAX_THREADS=%d, default=%d).", __func__, __LINE__,  MAX_TGROUPS, MAX_THREADS, thread_cpus_enabled_at_boot);
 	memprintf(&ptr, "Built with multi-threading support (MAX_TGROUPS=%d, MAX_THREADS=%d, default=%d).",
 		  MAX_TGROUPS, MAX_THREADS, thread_cpus_enabled_at_boot);
 	hap_register_build_opts(ptr, 1);

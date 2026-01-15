@@ -469,7 +469,8 @@ void conn_init(struct connection *conn, void *target)
 	conn->send_proxy_ofs = 0;
 	conn->handle.fd = DEAD_FD_MAGIC;
 	conn->err_code = CO_ER_NONE;
-	conn->target = target;
+	conn->target = target; // 根据target的指针值，可以反推出父对象的整体结构
+	                       // container_of(t, struct listener, obj_type);
 	conn->destroy_cb = NULL;
 	conn->proxy_netns = NULL;
 	MT_LIST_INIT(&conn->toremove_list);

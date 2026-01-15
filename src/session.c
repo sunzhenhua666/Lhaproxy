@@ -298,6 +298,16 @@ int session_accept_fd(struct connection *cli_conn)
 		return 1;
 	}
 
+    /*
+    accept 时会创建 struct connection 和 struct session（并把 connection.owner 指向 session）；
+    当 session 被认为“完成初始化”（即不再等待 transport/mux 握手或当握手完成后），
+    调用 conn_complete_session()，
+     它会安装 frontend mux（conn_install_mux_fe()），
+     mux 的 init 实现（例如 mux_pt_init）会创建 sedesc + stconn（stream connector），
+     sc_new_from_endp() 内部再调用 stream_new()；
+     stream_new() 会分配 struct stream，
+     创建两个 struct channel（req/res）并初始化它们。
+    */
 	/* OK let's complete stream initialization since there is no handshake */
 	if (conn_complete_session(cli_conn) >= 0)
 		return 1;

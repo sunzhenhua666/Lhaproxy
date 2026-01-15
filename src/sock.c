@@ -114,7 +114,7 @@ struct connection *sock_accept_conn(struct listener *l, int *status)
 			goto fail_conn;
 
 		/* Perfect, the connection was accepted */
-		conn = conn_new(&l->obj_type);
+		conn = conn_new(&l->obj_type); // container_of(t, struct listener, obj_type);
 		if (!conn)
 			goto fail_conn;
 

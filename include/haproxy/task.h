@@ -403,6 +403,27 @@ static inline void _tasklet_wakeup_on(struct tasklet *tl, int thr, const struct 
 #define tasklet_wakeup(tl) \
 	_tasklet_wakeup_on(tl, (tl)->tid, MK_CALLER(WAKEUP_TYPE_TASKLET_WAKEUP, 0, 0))
 
+/*
+
+wake_thread(thr)
+    ↓
+write(pipe)
+    ↓
+epoll_wait() returns
+    ↓
+thread_wake_cb()
+   - clear NOTIFIED
+   - clear SLEEPING
+   - drain pipe
+    ↓
+run_thread_loop()
+    ↓
+run tasklets
+run tasks
+handle timers
+
+*/
+
 /* instantly wakes up task <t> on its owner thread even if it's not the current
  * one, bypassing the run queue. The purpose is to be able to avoid contention
  * in the global run queue for massively remote tasks (e.g. queue) when there's
