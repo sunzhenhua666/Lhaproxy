@@ -425,9 +425,23 @@ struct xprt_ops {
 	void (*set_idle)(struct connection *conn, void *xprt_ctx); /* notify the xprt that the connection becomes idle. implies set_used. */
 	void (*set_used)(struct connection *conn, void *xprt_ctx); /* notify the xprt that the connection leaves idle. implies set_idle. */
 	char name[8];                               /* transport layer name, zero-terminated */
-	int (*subscribe)(struct connection *conn, void *xprt_ctx, int event_type, struct wait_event *es); /* Subscribe <es> to events, such as "being able to send" */
+    //TCP 发送缓冲区满, 同时等待可读 & 可写
+    int (*subscribe)(struct connection *conn, void *xprt_ctx, int event_type, struct wait_event *es); /* Subscribe <es> to events, such as "being able to send" */
 	int (*unsubscribe)(struct connection *conn, void *xprt_ctx, int event_type, struct wait_event *es); /* Unsubscribe <es> from events */
-	int (*remove_xprt)(struct connection *conn, void *xprt_ctx, void *toremove_ctx, const struct xprt_ops *newops, void *newctx); /* Remove an xprt from the connection, used by temporary xprt such as the handshake one */
+    /*
+    xprt = transport（传输层抽象）
+    xprt 并不是“一个 socket”，而是：对底层传输通道的统一抽象接口 
+    它把不同传输方式（TCP / SSL / Unix Socket）抽象成同一套操作。
+
+    add_xprt
+    将一个“新建立的传输连接”正式纳入事件系统和管理体系
+    它通常在以下时机被调用：
+    TCP accept() 成功
+    SSL 握手完成
+    主动 connect() 成功
+    
+    */
+    int (*remove_xprt)(struct connection *conn, void *xprt_ctx, void *toremove_ctx, const struct xprt_ops *newops, void *newctx); /* Remove an xprt from the connection, used by temporary xprt such as the handshake one */
 	int (*add_xprt)(struct connection *conn, void *xprt_ctx, void *toadd_ctx, const struct xprt_ops *toadd_ops, void **oldxprt_ctx, const struct xprt_ops **oldxprt_ops); /* Add a new XPRT as the new xprt, and return the old one */
 	struct ssl_sock_ctx *(*get_ssl_sock_ctx)(struct connection *); /* retrieve the ssl_sock_ctx in use, or NULL if none */
 	int (*show_fd)(struct buffer *, const struct connection *, const void *ctx); /* append some data about xprt for "show fd"; returns non-zero if suspicious */

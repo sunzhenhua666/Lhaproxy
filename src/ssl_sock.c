@@ -8147,7 +8147,7 @@ INITCALL1(STG_REGISTER, cli_register_kw, &cli_kws);
 struct xprt_ops ssl_sock = {
 	.snd_buf  = ssl_sock_from_buf,
 	.rcv_buf  = ssl_sock_to_buf,
-	.subscribe = ssl_subscribe,
+	.subscribe = ssl_subscribe, //TCP 发送缓冲区满, 同时等待可读 & 可写
 	.unsubscribe = ssl_unsubscribe,
 	.remove_xprt = ssl_remove_xprt,
 	.add_xprt = ssl_add_xprt,
